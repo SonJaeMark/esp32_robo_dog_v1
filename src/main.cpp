@@ -4,7 +4,12 @@
 #include <Adafruit_SSD1306.h>
 #include <ESP32Servo.h>
 #include <string>
-#include "BluetoothSerial.h"
+
+// BLE Libraries for ESP32
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 
 // OLED Settings
 #define SCREEN_WIDTH 128
@@ -24,8 +29,43 @@ Servo servos[NUM_SERVOS];
 const int STAND_ANGLES[NUM_SERVOS] = {90, 90, 90, 90};
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-BluetoothSerial SerialBT;
 
+// BLE UUIDs (Nordic UART Service standard is widely compatible with MIT App Inventor BLE extensions)
+#define SERVICE_UUID "6E400001-B5A3-F393-E0A9-E50e24dcca9e"
+#define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50e24dcca9e"
+#define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50e24dcca9e"
+
+bool deviceConnected = false;
+String receivedCommand = "";
+bool newDataReceived = false;
+
+class MyServerCallbacks: public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    deviceConnected = true;
+    Serial.println("BLE Client Connected");
+  };
+
+  void onDisconnect(BLEServer* pServer) {
+    deviceConnected = false;
+    Serial.println("BLE Client Disconnected");
+    // Restart advertising so apps can reconnect easily
+    pServer->getAdvertising()->start();
+  }
+};
+
+class MyCallbacks: public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    // Safely converts getValue() whether it returns std::string or Arduino String
+    String value = String(pCharacteristic->getValue().c_str());
+    
+    if (value.length() > 0) {
+      receivedCommand = value;
+      receivedCommand.trim();
+      receivedCommand.toLowerCase();
+      newDataReceived = true;
+    }
+  }
+};
 // OLED Drawing Helper
 void drawEyes(const char* leftEye, const char* rightEye) {
   display.clearDisplay();
@@ -63,28 +103,16 @@ void setAllServosToStand() {
   }
 }
 
-void setAllServosAngle(int angle) {
-  int targetAngle = constrain(angle, 0, 180);
-  for (int i = 0; i < NUM_SERVOS; i++) {
-    servos[i].write(targetAngle);
-  }
-}
-
-// Test Servo Angle: Rotates all feet 90 deg clockwise from standing (90 + 90 = 180), then returns slowly
 void testServoAngle() {
   drawExcited();
-  
-  // 1. Move all servos 90 degrees clockwise from their standing baseline (90 -> 180)
   int targetAngles[NUM_SERVOS];
   for (int i = 0; i < NUM_SERVOS; i++) {
     targetAngles[i] = constrain(STAND_ANGLES[i] + 90, 0, 180);
     servos[i].write(targetAngles[i]);
   }
-  
-  delay(1000); // Hold the test position briefly
+  delay(1000); 
   drawSqueezing();
 
-  // 2. Slowly return each servo back to its starting standing angle (90)
   for (int step = 0; step <= 90; step += 2) {
     for (int i = 0; i < NUM_SERVOS; i++) {
       int currentAngle = targetAngles[i] - step;
@@ -93,17 +121,15 @@ void testServoAngle() {
       }
       servos[i].write(currentAngle);
     }
-    delay(25); // Control the slowness of the return motion
+    delay(25);
   }
 
-  // Ensure all servos are precisely back at baseline
   setAllServosToStand();
   drawDefault1();
 }
 
 void hello() {
   setAllServosToStand();
-
   setServoAngle(2, 55);
   delay(500);
   drawExcited();
@@ -111,7 +137,6 @@ void hello() {
   setServoAngle(0, 105);
   setServoAngle(3, 105);
   delay(500);
-
 
   setServoAngle(1, 0);
   drawSqueezing();
@@ -146,29 +171,21 @@ void sit(){
 }
 
 void walk(int steps) {
-
-  // Number of walking steps/cycles
   for (int cycle = 0; cycle < steps; cycle++) {
-    // Phase 1: Stretch leg 0 (FL) & leg 3 (BR) forward/back
-    // Leg 0 -> 180° (stretch front), Leg 3 -> 0° (stretch back relative to standing)
-    drawExcited(); // Show animation during walking
+    drawExcited(); 
     servos[0].write(180); 
     servos[3].write(0);
-    // Corresponding alternate legs return or shift
     servos[1].write(0);
     servos[2].write(180);
-    delay(250); // Adjust speed of step
+    delay(250); 
 
-    // Phase 2: Switch diagonal pair positions
-    drawSqueezing(); // Show animation during walking
+    drawSqueezing(); 
     servos[0].write(0);
     servos[3].write(180);
     servos[1].write(180);
     servos[2].write(0);
-    delay(250); // Adjust speed of step
+    delay(250); 
   }
-
-  // Return all legs safely back to the standing baseline (90°)
   setAllServosToStand();
   drawDefault1();
 }
@@ -182,37 +199,31 @@ bool myCustomDelay(unsigned long &lastDelay, unsigned long interval) {
   return false;
 }
 
-// Global variables for face sequence timing
 unsigned long faceTimer = 0;
 int currentFaceStep = 0;
 
-// Non-blocking sequence for expression transitions
 void updateFaceSequence() {
   switch (currentFaceStep) {
     case 0:
       drawDefault1();
       if (myCustomDelay(faceTimer, 700)) currentFaceStep++;
       break;
-
     case 1:
       drawDefault0();
       if (myCustomDelay(faceTimer, 100)) currentFaceStep++;
       break;
-
     case 2:
       drawDefault1();
       if (myCustomDelay(faceTimer, 100)) currentFaceStep++;
       break;
-
     case 3:
       drawDefault0();
       if (myCustomDelay(faceTimer, 100)) currentFaceStep++;
       break;
-
     case 4:
       drawDefault1();
       if (myCustomDelay(faceTimer, 2500)) {
-        currentFaceStep = 0; // Reset loop sequence
+        currentFaceStep = 0; 
       }
       break;
   }
@@ -234,53 +245,72 @@ void setup() {
   ESP32PWM::allocateTimer(2);
   ESP32PWM::allocateTimer(3);
 
-  // Initialize all 4 Servos for 180° operation
+  // Initialize Servos
   for (int i = 0; i < NUM_SERVOS; i++) {
     servos[i].setPeriodHertz(50);
-    // Standard 180° pulse width range: 500us to 2500us
     servos[i].attach(SERVO_PINS[i], 500, 2500);
-    
-    // Write standing angles (90° for all servos)
     servos[i].write(STAND_ANGLES[i]);
   }
 
-  // Initialize Bluetooth
-  SerialBT.begin("ESP32_RoboDog");
-  Serial.println("Bluetooth Started! Ready to pair.");
+  // Initialize BLE Server
+  BLEDevice::init("ESP32_RoboDog");
+  BLEServer *pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  BLECharacteristic *pCharacteristicTX = pService->createCharacteristic(
+                                        CHARACTERISTIC_UUID_TX,
+                                        BLECharacteristic::PROPERTY_NOTIFY
+                                      );
+  pCharacteristicTX->addDescriptor(new BLE2902());
+
+  BLECharacteristic *pCharacteristicRX = pService->createCharacteristic(
+                                        CHARACTERISTIC_UUID_RX,
+                                        BLECharacteristic::PROPERTY_WRITE
+                                      );
+  pCharacteristicRX->setCallbacks(new MyCallbacks());
+
+  pService->start();
+  
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);  
+  pAdvertising->setMinPreferred(0x12);
+  BLEDevice::startAdvertising();
+  
+  Serial.println("BLE Server Started! Ready to pair.");
 }
 
-unsigned long lastBlinkTime = 0;
-
 void loop() {
-  // Bluetooth processing runs continuously
-  if (SerialBT.available()) {
-    String command = SerialBT.readStringUntil('\n');
-    command.trim();
-    command.toLowerCase();
+  // Process incoming BLE commands asynchronously
+  if (newDataReceived) {
+    newDataReceived = false;
+    Serial.print("Received BLE Command: ");
+    Serial.println(receivedCommand);
 
-    if (command.indexOf("hello") != -1) {
+    if (receivedCommand.indexOf("hello") != -1) {
       hello();
     } 
-    else if (command.indexOf("test servo") != -1) {
+    else if (receivedCommand.indexOf("test servo") != -1) {
       testServoAngle();
     }
-    else if (command.indexOf("play dead") != -1) {
+    else if (receivedCommand.indexOf("play dead") != -1) {
       playDead();
     }
-    else if (command.indexOf("sit") != -1) {
+    else if (receivedCommand.indexOf("sit") != -1) {
       sit();
     }
-    else if (command.indexOf("walk") != -1) {
-      walk(4); // Walk 4 steps
+    else if (receivedCommand.indexOf("walk") != -1) {
+      walk(4); 
     }
-    else if (command.indexOf("long walk") != -1) {
-      walk(8); // Walk 8 steps
+    else if (receivedCommand.indexOf("long walk") != -1) {
+      walk(8); 
     }
-    else if (command.indexOf("stand") != -1){
+    else if (receivedCommand.indexOf("stand") != -1){
       setAllServosToStand();
     }
-    
-
   }
 
   // Update idle animation continuously without blocking
